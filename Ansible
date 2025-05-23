@@ -1,0 +1,93 @@
+---
+- name: Install and configure k3s cluster
+  hosts: all
+  become: yes
+  tasks:
+    - name: Install prerequisites
+      apt:
+        name:
+          - curl
+          - gnupg
+          - software-properties-common
+          - apt-transport-https
+          - ca-certificates
+        state: present
+        update_cache: yes
+      when: ansible_os_family == 'Debian'
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: Install Docker
+      package:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+
+    - name: Start and enable Docker service
+      service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Install k3s
+      shell: |
+        curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.27.4+k3s1 sh -s - \
+          --write-kubeconfig-mode 644 \
+          --disable traefik \
+          --disable servicelb \
+          --enable metrics-server
+      args:
+        creates: /usr/local/bin/k3s
+
+    - name: Install kubectl
+      shell: |
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+        rm kubectl
+      args:
+        creates: /usr/local/bin/kubectl
+
+    - name: Install Helm
+      shell: |
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      args:
+        creates: /usr/local/bin/helm
+
+    - name: Configure kubectl access
+      block:
+        - name: Copy kubeconfig to ~/.kube/config
+          copy:
+            src: /etc/rancher/k3s/k3s.yaml
+            dest: "{{ ansible_env.HOME }}/.kube/config"
+            remote_src: yes
+            owner: "{{ ansible_user_id }}"
+            group: "{{ ansible_user_gid }}"
+            mode: '0600'
+
+        - name: Update kubeconfig server address
+          replace:
+            path: "{{ ansible_env.HOME }}/.kube/config"
+            regexp: 'server: https://127.0.0.1:6443'
+            replace: 'server: https://{{ ansible_host }}:6443'
+
+      when: inventory_hostname == play_hosts[0]  # Only run on first host if multiple
+
+    - name: Wait for Kubernetes cluster to be ready
+      command: kubectl get nodes
+      register: k8s_ready
+      until: k8s_ready.rc == 0
+      retries: 10
+      delay: 10
+      changed_when: false
